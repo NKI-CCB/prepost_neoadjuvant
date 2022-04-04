@@ -9,5 +9,6 @@ Included are ensembl gene identifiers, gene names, cluster id and associated bio
 - val_neoadj_sign.Rmd
 R markdown file containing the source code to validate the metagene signature in a new independent cohort. 
 The new dataset should contain normalized gene expression data in log scale. These values can then be transformed using the (modified) Z-score.
-As example, the TCGA BRCA dataset from the PANCAN study 2018 is used (https://www.sciencedirect.com/science/article/pii/S0092867418303027)
-Source data not included! These data can be obtained through cBioPortal (https://www.cbioportal.org/study/summary?id=brca_tcga_pan_can_atlas_2018)
+
+As example, the [TCGA BRCA dataset from the PANCAN study 2018](https://www.sciencedirect.com/science/article/pii/S0092867418303027) is used.
+Source data not included! These data can be obtained through [cBioPortal](https://www.cbioportal.org/study/summary?id=brca_tcga_pan_can_atlas_2018)
