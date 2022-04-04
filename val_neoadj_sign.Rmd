@@ -1,0 +1,211 @@
+---
+title: "Validation breast cancer metagene score"
+author: "M. Hoogstraat"
+date: "3/24/2022"
+output: html_document
+---
+
+# R code to validate the metagene score from M. Hoogstraat et al., in an independent dataset
+
+The new dataset should contain normalized gene expression data in log scale. 
+These values can then be transformed using the (modified) Z-score, for example:
+```{r z_transform_example, eval=F}
+exprs_z <- 0.6745 * (exprs - apply(exprs, 1, median)) / abs(apply(exprs, 1, mad))
+```
+...where 'exprs' is a dataframe containing ONLY the normalized, log scaled expression data, with samples in columns and genes in rows.
+Column headers should contain sample identifiers.
+Rownames should contain gene identifiers (HUGO symbol, ensembl gene id, entrez id).
+
+As an example, the R source code to validate the signature in the TCGA breast cancer dataset is provided below.
+
+# Validation of the metagene score in the [TCGA BRCA 2018 dataset](https://www.sciencedirect.com/science/article/pii/S0092867418303027)
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Loading required libraries
+```{r loading_libs, message=F, warning=F}
+library(survival)
+```
+
+#### Loading required files
+```{r loading_data}
+rna_zscores <- read.delim("data_RNA_Seq_v2_mRNA_median_Zscores.txt") #Source data not provided
+clindat <- read.delim("data_clinical_patient.txt",comment.char="#") #Source data not provided
+clindat$colnames <- paste(gsub("-",".",clindat$PATIENT_ID),".01",sep="")
+metagene_genes<-read.delim("metagene_genelist.txt")
+rownames(metagene_genes) <- metagene_genes$gene_name
+```
+
+#### Testing the amount of genes from original signature present in new data
+```{r test_overlap}
+knitr::kable(table(metagene_genes$gene_name[which(metagene_genes$process %in% c('proliferation','immune response','ECM associated'))] %in% rna_zscores$Hugo_Symbol), caption="Genes from signature present in new data")
+```
+
+## BRCA_Basal
+
+#### Obtain gene expression levels from signature genes
+```{r get_genes_Basal}
+rna_zscores_basal <- as.data.frame(rbind(
+	rna_zscores[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "proliferation")]),
+		as.vector(clindat$colnames[which(clindat$SUBTYPE == "BRCA_Basal")])],
+	rna_zscores[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "immune response")]),
+		as.vector(clindat$colnames[which(clindat$SUBTYPE == "BRCA_Basal")])]
+	))
+
+rna_zscores_basal <- as.data.frame(rbind(
+	rna_zscores_basal,
+	rna_zscores[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "ECM associated")]),
+		as.vector(clindat$colnames[which(clindat$SUBTYPE == "BRCA_Basal")])]
+	))
+
+rownames(rna_zscores_basal) <- c(
+	as.vector(rna_zscores$Hugo_Symbol[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "proliferation")])]),
+	as.vector(rna_zscores$Hugo_Symbol[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "immune response")])]),
+	as.vector(rna_zscores$Hugo_Symbol[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "ECM associated")])])
+)
+```
+
+#### Calculate metagenes and cutoffs
+```{r get_metagenes_Basal}
+clindat_basal <- clindat[which(clindat$SUBTYPE == "BRCA_Basal"),]
+
+clindat_basal$Proliferation <- apply(rna_zscores_basal[as.vector(metagene_genes$gene_name[which(metagene_genes$process == "proliferation" & metagene_genes$gene_name %in% rownames(rna_zscores_basal))]),],2,median)
+
+clindat_basal$Immune <- apply(rna_zscores_basal[as.vector(metagene_genes$gene_name[which(metagene_genes$process == "immune response" & metagene_genes$gene_name %in% rownames(rna_zscores_basal))]),],2,median)
+
+clindat_basal$ECM <- apply(rna_zscores_basal[as.vector(metagene_genes$gene_name[which(metagene_genes$process == "ECM associated" & metagene_genes$gene_name %in% rownames(rna_zscores_basal))]),],2,median)
+
+clindat_basal$cutoffs <- "other"
+clindat_basal$cutoffs[which(clindat_basal$Proliferation >= median(clindat_basal$Proliferation) & clindat_basal$Immune >= median(clindat_basal$Immune) & clindat_basal$ECM < median(clindat_basal$ECM))] <- "HHL"
+clindat_basal$cutoffs[which(clindat_basal$Proliferation < median(clindat_basal$Proliferation) & clindat_basal$Immune < median(clindat_basal$Immune) & clindat_basal$ECM >= median(clindat_basal$ECM))] <- "LLH"
+```
+
+#### Process clinical data
+```{r parse_clindat_Basal}
+clindat_basal$PFS_stat_bin <- 0
+clindat_basal$PFS_stat_bin[which(clindat_basal$PFS_STATUS == "PROGRESSION")] <- 1
+
+clindat_basal$n_stage <- 1
+clindat_basal$n_stage[grep("N0",clindat_basal$PATH_N_STAGE)] <- 0
+clindat_basal$t_stage_bin <- NA
+clindat_basal$t_stage_bin[grep("T[12]",clindat_basal$PATH_T_STAGE)] <- "1_2"
+clindat_basal$t_stage_bin[grep("T[34]",clindat_basal$PATH_T_STAGE)] <- "3_4"
+```
+
+#### Calculate association metagene score vs progression-free survival in various subgroups
+```{r associate_clindat_metagene_Basal}
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal)
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal[which(clindat_basal$n_stage == 1 | clindat_basal$t_stage_bin == "3_4"),])
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal[which(clindat_basal$n_stage == 0 ),])
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal[which(clindat_basal$n_stage == 1 ),])
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal[which(clindat_basal$t_stage_bin == "1_2"),])
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal[which(clindat_basal$t_stage_bin == "3_4"),])
+```
+
+#### Visualize association metagene score vs progression-free survival in various subgroups
+```{r visualize_assoc_Basal, fig.height=10}
+par(mfrow=c(3,2))
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal), mark.time=T,col=c("orange","blue","grey"),main="All_basal",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,20))
+legend('bottomleft',lwd=2,col=c('blue','orange','grey'), legend=c('HHL','LLH','other'),cex=1.5)
+text(15,0.2,labels="P = 0.2",cex=2)
+
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal[which(clindat_basal$n_stage == 1 | clindat_basal$t_stage_bin == "3_4"),]), mark.time=T,col=c("orange","blue","grey"),main="Basal, N+ or T-stage 3 or 4",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,20))
+text(15,0.2,labels="P = 0.02",cex=2)
+
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal[which(clindat_basal$n_stage == 0 ),]), mark.time=T,col=c("orange","blue","grey"),main="Basal, N-",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,20))
+text(15,0.2,labels="P = 0.7",cex=2)
+
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal[which(clindat_basal$n_stage == 1 ),]), mark.time=T,col=c("orange","blue","grey"),main="Basal, N+",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,20))
+text(15,0.2,labels="P = 0.004",cex=2)
+
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal[which(clindat_basal$t_stage_bin == "1_2" ),]), mark.time=T,col=c("orange","blue","grey"),main="Basal, T-stage 1 or 2",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,20))
+text(15,0.2,labels="P = 0.8",cex=2)
+
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_basal[which(clindat_basal$t_stage_bin == "3_4" ),]), mark.time=T,col=c("orange","blue","grey"),main="Basal, T-stage 3 or 4",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,20))
+text(15,0.2,labels="P = 0.3",cex=2)
+```
+
+## BRCA_Luminal
+
+#### Obtain gene expression levels from signature genes
+```{r get_genes_Lum}
+rna_zscores_lum <- as.data.frame(rbind(
+	rna_zscores[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "proliferation")]),
+		as.vector(clindat$colnames[which(clindat$SUBTYPE %in% c("BRCA_LumA", "BRCA_LumB"))])],
+	rna_zscores[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "immune response")]),
+		as.vector(clindat$colnames[which(clindat$SUBTYPE %in% c("BRCA_LumA", "BRCA_LumB"))])]
+	))
+rna_zscores_lum <- as.data.frame(rbind(
+	rna_zscores_lum,
+	rna_zscores[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "ECM associated")]),
+		as.vector(clindat$colnames[which(clindat$SUBTYPE %in% c("BRCA_LumA", "BRCA_LumB"))])]
+	))
+
+rownames(rna_zscores_lum) <- c(
+	as.vector(rna_zscores$Hugo_Symbol[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "proliferation")])]),
+	as.vector(rna_zscores$Hugo_Symbol[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "immune response")])]),
+	as.vector(rna_zscores$Hugo_Symbol[which(rna_zscores$Hugo_Symbol %in% metagene_genes$gene_name[which(metagene_genes$process == "ECM associated")])])
+)
+```
+
+#### Calculate metagenes and cutoffs
+```{r get_metagenes_Lum}
+clindat_lum <- clindat[which(clindat$SUBTYPE %in% c("BRCA_LumA", "BRCA_LumB")),]
+clindat_lum$PFS_stat_bin <- 0
+clindat_lum$PFS_stat_bin[which(clindat_lum$PFS_STATUS == "PROGRESSION")] <- 1
+
+clindat_lum$Proliferation <- apply(rna_zscores_lum[as.vector(metagene_genes$gene_name[which(metagene_genes$process == "proliferation" & metagene_genes$gene_name %in% rownames(rna_zscores_lum))]),],2,median)
+clindat_lum$Immune <- apply(rna_zscores_lum[as.vector(metagene_genes$gene_name[which(metagene_genes$process == "immune response" & metagene_genes$gene_name %in% rownames(rna_zscores_lum))]),],2,median)
+clindat_lum$ECM <- apply(rna_zscores_lum[as.vector(metagene_genes$gene_name[which(metagene_genes$process == "ECM associated" & metagene_genes$gene_name %in% rownames(rna_zscores_lum))]),],2,median)
+```
+
+#### Process clinical data
+```{r parse_clindat_Lum}
+clindat_lum$cutoffs <- "other"
+clindat_lum$cutoffs[which(clindat_lum$Proliferation >= median(clindat_lum$Proliferation) & clindat_lum$Immune >= median(clindat_lum$Immune) & clindat_lum$ECM < median(clindat_lum$ECM))] <- "HHL"
+clindat_lum$cutoffs[which(clindat_lum$Proliferation < median(clindat_lum$Proliferation) & clindat_lum$Immune < median(clindat_lum$Immune) & clindat_lum$ECM >= median(clindat_lum$ECM))] <- "LLH"
+
+clindat_lum$n_stage <- 1
+clindat_lum$n_stage[grep("N0",clindat_lum$PATH_N_STAGE)] <- 0
+clindat_lum$t_stage_bin <- NA
+clindat_lum$t_stage_bin[grep("T[12]",clindat_lum$PATH_T_STAGE)] <- "1_2"
+clindat_lum$t_stage_bin[grep("T[34]",clindat_lum$PATH_T_STAGE)] <- "3_4"
+```
+
+#### Calculate association metagene score vs progression-free survival in various subgroups
+```{r associate_clindat_metagene_Lum}
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum)
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum[which(clindat_lum$n_stage == 1 | clindat_lum$t_stage_bin == "3_4"),])
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum[which(clindat_lum$n_stage == 0 ),])
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum[which(clindat_lum$n_stage == 1 ),])
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum[which(clindat_lum$t_stage_bin == "1_2" ),])
+survdiff(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum[which(clindat_lum$t_stage_bin == "3_4" ),])
+```
+
+#### Visualize association metagene score vs progression-free survival in various subgroups
+```{r visualize_assoc_Lum, fig.height=10}
+par(mfrow=c(3,2))
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum), mark.time=T,col=c("orange","blue","grey"),main="All_lum",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,14))
+legend('bottomleft',lwd=2,col=c('blue','orange','grey'), legend=c('HHL','LLH','other'),cex=1.5)
+text(10,0.2,labels="P = 0.09",cex=2)
+
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum[which(clindat_lum$n_stage == 1 | clindat_lum$t_stage_bin == "3_4"),]), mark.time=T,col=c("orange","blue","grey"),main="Luminal, N+ or T-stage 3 or 4",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,14))
+text(10,0.2,labels="P = 0.1",cex=2)
+
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum[which(clindat_lum$n_stage == 0 ),]), mark.time=T,col=c("orange","blue","grey"),main="Luminal, N-",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,14))
+text(10,0.2,labels="P = 0.8",cex=2)
+
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum[which(clindat_lum$n_stage == 1 ),]), mark.time=T,col=c("orange","blue","grey"),main="Luminal, N+",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,14))
+text(10,0.2,labels="P = 0.1",cex=2)
+
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum[which(clindat_lum$t_stage_bin == "1_2" ),]), mark.time=T,col=c("orange","blue","grey"),main="Luminal, T-stage 1 or 2",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,14))
+text(10,0.2,labels="P = 0.5",cex=2)
+
+plot(survfit(Surv(PFS_MONTHS/12, PFS_stat_bin) ~ cutoffs, data=clindat_lum[which(clindat_lum$t_stage_bin == "3_4" ),]), mark.time=T,col=c("orange","blue","grey"),main="Luminal, T-stage 3 or 4",xlab="Progression-free survival (years)",ylab="Proportion of patients at risk",lwd=2, cex.lab=1.5, cex.axis=1.5,cex.main=1.5,xlim=c(0,14))
+text(10,0.2,labels="P = 0.1",cex=2)
+```
+
+
